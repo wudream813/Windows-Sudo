@@ -23,10 +23,12 @@ g++ WinSudo.cpp -lWtsApi32 -lUserenv -lntdll -ladvapi32 -lgdi32 -lcomctl32 -lMsf
 // 全局配置
 // ==========================================
 
-bool g_bDebug = false;
-std::vector<std::string> g_vecGroups;
-HWND g_hLogEdit = NULL;
-HWND g_hGroupEditor = NULL; // 跟踪编辑器窗口句柄
+bool g_bDebug = false, g_bUIAccess = false;
+std::vector<std::string> extraGroups;
+int g_WindowCreateMode = SW_SHOWNORMAL;
+DWORD Integrity_Level = SECURITY_MANDATORY_SYSTEM_RID;
+HWND g_hLogEdit = NULL, g_hGroupEditor = NULL; // 跟踪编辑器窗口句柄
+LPSTR g_desktop = (LPSTR)"winsta0\\default", g_runCommand = (LPSTR)"cmd.exe", g_identityStr = (LPSTR)"System";
 
 // ==========================================
 // 日志系统
@@ -154,10 +156,46 @@ typedef NTSTATUS(NTAPI* PNtCreateToken)(
 
 void ShowUsage(const char* prog) {
     printf("\n");
-    printf("WinSudo v3.4 - 以任意身份运行程序\n");
+    printf("WinSudo v3.0.0 - 以任意身份运行程序\n");
     printf("================================\n\n");
-    printf("用法: %s [选项] <命令>\n\n", prog);
-    printf("  -GUI              显示图形界面\n\n");
+    printf("用法: %s [选项] [命令 (默认为 cmd.exe)]\n\n", prog);
+    printf("身份选项:\n");
+    printf("  -U:<名称|SID>     指定运行身份 (默认: System)\n");
+    printf("                    快捷方式: S/System, A/Admin, TI/TrustedInstaller\n");
+    printf("令牌选项:\n");
+    printf("  -G:<组名>         向令牌添加额外的组 (含空格需加引号)\n");
+    printf("  --UIAccess        让令牌有 UI Access\n");
+    printf("  -IL:<完整性级别>    设置令牌的完整性级别\n");
+    printf("  可用完整性级别选项:\n");
+    printf("      U, Untrusted  非信任级 (SECURITY_MANDATORY_UNTRUSTED_RID)\n");
+    printf("      L, Low        低完整性级 (SECURITY_MANDATORY_LOW_RID)\n");
+    printf("      M, Medium     中等完整性级 (SECURITY_MANDATORY_MEDIUM_RID)\n");
+    printf("      M+, Medium+   中等增强级 (SECURITY_MANDATORY_MEDIUM_PLUS_RID)\n");
+    printf("      H, High       高完整性级 (SECURITY_MANDATORY_HIGH_RID)\n");
+    printf("      S, System     系统完整性级 (SECURITY_MANDATORY_SYSTEM_RID)\n");
+    printf("运行选项:\n");
+    printf("  -B, --Bypass      使用 UAC Bypass 方式提权\n");
+    printf("  -D, --Debug       显示调试信息\n");
+    printf("  -GUI              使用图形化界面\n");
+    printf("  -P:<桌面>         设置启动的桌面\n");
+    printf("  -C:<目录>         设置启动路径 (不包含使用当前路径启动)\n");
+    printf("  -M:<选项>         以指定窗口模式选项创建进程 (不包含使用默认窗口模式选项)\n");
+    printf("  可用选项: \n");
+    printf("      I, Inline     内联模式 (在当前控制台运行)\n");
+    printf("      H, Hide       隐藏窗口\n");
+    printf("      Max, Maximize 最大化\n");
+    printf("      Min, Minimize 最小化\n");
+    printf("  -h, --help, /?    显示此帮助\n\n");
+    printf("示例:\n");
+    printf("  %s -U:TI cmd.exe                         以 TrustedInstaller 身份运行 cmd\n", prog);
+    printf("  %s -M:I cmd.exe                          以 SYSTEM 身份内联运行 cmd\n", prog);
+    printf("  %s -GUI                                  以 SYSTEM 身份内联运行 cmd\n", prog);
+    printf("  %s -P:winsta0\\winlogon cmd.exe           在 winlogon 安全桌面启动 SYSTEM 身份的 cmd\n", prog);
+    printf("  %s --UIAccess cmd.exe                    以 SYSTEM 身份运行带有 UIAccess 标志的 cmd\n", prog);
+    printf("  %s -IL:Medium cmd.exe                    以 SYSTEM 身份运行中等完整性级的 cmd\n", prog);
+    printf("  %s -G:\"CONSOLE LOGON\" cmd.exe            添加控制台登录组, 以 SYSTEM 身份运行 cmd\n", prog);
+    printf("  %s -B -U:S cmd.exe                       使用 bypass 方式, 以 SYSTEM 身份运行 cmd\n", prog);
+    printf("  %s cmd /k echo \"hello world\"             运行带参数的命令\n", prog);
 }
 
 BOOL IsUserAnAdmin() {
@@ -323,7 +361,6 @@ DWORD ResolveILlevel(const char* level) {
     if (_stricmp(level, "medium+") == 0 || _stricmp(level, "m+") == 0)return SECURITY_MANDATORY_MEDIUM_PLUS_RID;
     if (_stricmp(level, "high") == 0 || _stricmp(level, "h") == 0)return SECURITY_MANDATORY_HIGH_RID;
     if (_stricmp(level, "system") == 0 || _stricmp(level, "s") == 0)return SECURITY_MANDATORY_SYSTEM_RID;
-    if (_stricmp(level, "protected") == 0 || _stricmp(level, "p") == 0)return SECURITY_MANDATORY_PROTECTED_PROCESS_RID;
     return (DWORD)-1;
 }
 
@@ -387,7 +424,7 @@ HANDLE GetLsassToken() {
     return hLsassToken;
 }
 
-HANDLE CreateCustomToken(DWORD targetSessionId, PSID pUserSid, const std::vector<const char*>& extraGroups) {
+HANDLE CreateCustomToken(DWORD targetSessionId, PSID pUserSid, const std::vector<std::string>& extraGroups) {
     Log(LOG_DEBUG, "CreateCustomToken: Session=%d", targetSessionId);
 
     PNtCreateToken NtCreateToken = (PNtCreateToken)GetProcAddress(
@@ -428,14 +465,14 @@ HANDLE CreateCustomToken(DWORD targetSessionId, PSID pUserSid, const std::vector
     if (pSidIntegrity) groups.push_back({ pSidIntegrity, SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED });
 
     for (const auto& groupName : extraGroups) {
-        PSID sid = GetSidFromString(groupName);
-        if (!sid) sid = GetSidForAccountName(groupName);
+        PSID sid = GetSidFromString(groupName.c_str());
+        if (!sid) sid = GetSidForAccountName(groupName.c_str());
         if (sid) {
             groups.push_back({ sid, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT });
-            Log(LOG_DEBUG, "添加组: %s", groupName);
+            Log(LOG_DEBUG, "添加组: %s", groupName.c_str());
         }
         else {
-            Log(LOG_WARN, "无法解析组: %s", groupName);
+            Log(LOG_WARN, "无法解析组: %s", groupName.c_str());
         }
     }
 
@@ -487,31 +524,34 @@ HANDLE CreateCustomToken(DWORD targetSessionId, PSID pUserSid, const std::vector
 }
 
 BOOL ExecuteSudoOperation(
-    const std::string& cmdLine,
-    const std::string& identityStr,
-    const std::string& desktop,
+    LPSTR cmdLine,
+    LPSTR identityStr,
+    LPSTR desktop,
     const std::string& workingDir,
     int windowMode,
     DWORD integrityLevel,
     BOOL bUIAccess,
-    const std::vector<const char*>& extraGroups,
+    const std::vector<std::string>& extraGroups,
     PROCESS_INFORMATION* pOutPI // 可选
 ) {
     Log(LOG_INFO, "正在准备启动进程...");
-    Log(LOG_DEBUG, "命令: %s", cmdLine.c_str());
-    Log(LOG_DEBUG, "身份: %s", identityStr.c_str());
+    Log(LOG_DEBUG, "命令: %s", cmdLine);
+    Log(LOG_DEBUG, "启动桌面: %s", desktop);
+    Log(LOG_DEBUG, "身份: %s", identityStr);
     if (workingDir.empty()) {
         char tmp[MAX_PATH];
         GetCurrentDirectoryA(MAX_PATH, tmp);
-        Log(LOG_DEBUG, "目录: %s", workingDir.c_str());
+        Log(LOG_DEBUG, "目录: %s", tmp);
     }
     else Log(LOG_DEBUG, "目录: %s", workingDir.c_str());
+    if (bUIAccess) Log(LOG_DEBUG, "启用 UIAccess");
+    if (integrityLevel != (DWORD)-1) Log(LOG_DEBUG, "完整性级别: 0x%06x", integrityLevel);
 
     DWORD sess = GetActiveSessionID();
 
-    PSID pTargetSid = ResolveIdentity(identityStr.c_str());
+    PSID pTargetSid = ResolveIdentity(identityStr);
     if (!pTargetSid) {
-        Log(LOG_ERROR, "无法解析身份: %s", identityStr.c_str());
+        Log(LOG_ERROR, "无法解析身份: %s", identityStr);
         return FALSE;
     }
 
@@ -519,7 +559,9 @@ BOOL ExecuteSudoOperation(
     if (hLsassToken == NULL) return FALSE;
 
     if (!ImpersonateLoggedOnUser(hLsassToken)) {
-        Log(LOG_ERROR, "模拟 LSASS 失败");
+        DWORD ErrCode = GetLastError();
+        Log(LOG_ERROR, "模拟 LSASS 失败: %lu", ErrCode);
+        Log_ErrorCode(LOG_WARN, ErrCode);
         CloseHandle(hLsassToken);
         return FALSE;
     }
@@ -536,6 +578,10 @@ BOOL ExecuteSudoOperation(
         BOOL UIAccess = TRUE;
         if (SetTokenInformation(hToken, TokenUIAccess, &UIAccess, sizeof(BOOL))) {
             Log(LOG_SUCCESS, "UI Access 标志已启用");
+        } else {
+            DWORD ErrCode = GetLastError();
+            Log(LOG_WARN, "设置 UI Access 标志失败: %lu", ErrCode);
+            Log_ErrorCode(LOG_WARN, ErrCode);
         }
     }
 
@@ -548,15 +594,21 @@ BOOL ExecuteSudoOperation(
         TOKEN_MANDATORY_LABEL tml = {};
         tml.Label.Attributes = SE_GROUP_INTEGRITY;
         tml.Label.Sid = &sid;
-        SetTokenInformation(hToken, TokenIntegrityLevel, &tml, sizeof(TOKEN_MANDATORY_LABEL) + sizeof(DWORD));
-        DeleteDisabledPrivileges(hToken);
+        if (SetTokenInformation(hToken, TokenIntegrityLevel, &tml, sizeof(TOKEN_MANDATORY_LABEL) + sizeof(DWORD))) {
+            Log(LOG_SUCCESS, "设置完整性级别成功！");
+            DeleteDisabledPrivileges(hToken);
+        } else {
+            DWORD ErrCode = GetLastError();
+            Log(LOG_WARN, "设置完整性级别失败: %lu", ErrCode);
+            Log_ErrorCode(LOG_WARN, ErrCode);
+        }
     }
 
     LPVOID lpEnv = NULL;
     CreateEnvironmentBlock(&lpEnv, hToken, FALSE);
 
     STARTUPINFOA si = { sizeof(si) };
-    si.lpDesktop = (LPSTR)desktop.c_str();
+    si.lpDesktop = desktop;
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = windowMode;
     PROCESS_INFORMATION pi = { 0 };
@@ -564,7 +616,7 @@ BOOL ExecuteSudoOperation(
     LPCSTR lpCurrentDir = workingDir.empty() ? NULL : workingDir.c_str();
 
     BOOL success = CreateProcessAsUserA(
-        hToken, NULL, (LPSTR)cmdLine.c_str(), NULL, NULL, FALSE,
+        hToken, NULL, cmdLine, NULL, NULL, FALSE,
         dwCreationFlags, lpEnv, lpCurrentDir, &si, &pi
     );
 
@@ -585,6 +637,7 @@ BOOL ExecuteSudoOperation(
     else {
         DWORD err = GetLastError();
         Log(LOG_ERROR, "进程创建失败: %lu", err);
+        Log_ErrorCode(LOG_ERROR, err);
         return FALSE;
     }
 }
@@ -650,11 +703,11 @@ LRESULT CALLBACK GroupEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         ListView_InsertColumn(hList, 0, &lvc);
 
         // 填充数据
-        for (size_t i = 0; i < g_vecGroups.size(); i++) {
+        for (size_t i = 0; i < extraGroups.size(); i++) {
             LVITEMA lvi = { 0 };
             lvi.mask = LVIF_TEXT;
             lvi.iItem = (int)i;
-            lvi.pszText = (LPSTR)g_vecGroups[i].c_str();
+            lvi.pszText = (LPSTR)extraGroups[i].c_str();
             ListView_InsertItem(hList, &lvi);
         }
 
@@ -745,12 +798,12 @@ LRESULT CALLBACK GroupEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         break;
     }
     case WM_CLOSE: {
-        g_vecGroups.clear();
+        extraGroups.clear();
         int count = ListView_GetItemCount(hList);
         char buf[256];
         for (int i = 0; i < count; i++) {
             ListView_GetItemText(hList, i, 0, buf, 255);
-            if (strlen(buf) > 0) g_vecGroups.push_back(buf);
+            if (strlen(buf) > 0) extraGroups.push_back(buf);
         }
 
         // 通知父窗口更新
@@ -758,12 +811,10 @@ LRESULT CALLBACK GroupEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (hParent && IsWindow(hParent)) {
             HWND hEditGrp = GetDlgItem(hParent, 1014); // ID_EDIT_GROUPS
             if (hEditGrp) {
-                // 简单声明 external linkage 或重新复制 UpdateGroupEditText 函数到这里
-                // 为了简洁，直接在这里写逻辑:
-                if (g_vecGroups.empty()) SetWindowTextA(hEditGrp, "");
-                else if (g_vecGroups.size() == 1) SetWindowTextA(hEditGrp, g_vecGroups[0].c_str());
+                if (extraGroups.empty()) SetWindowTextA(hEditGrp, "");
+                else if (extraGroups.size() == 1) SetWindowTextA(hEditGrp, extraGroups[0].c_str());
                 else {
-                    std::string txt = g_vecGroups[0] + "...";
+                    std::string txt = extraGroups[0] + "...";
                     SetWindowTextA(hEditGrp, txt.c_str());
                 }
             }
@@ -864,7 +915,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // --- 第一行：命令 ---
         HWND hLblCmd = CreateWindowA("STATIC", "运行命令 (Command):", WS_CHILD | WS_VISIBLE, 20, 10, 300, 20, hwnd, NULL, NULL, NULL);
         SendMessageA(hLblCmd, WM_SETFONT, (WPARAM)hFont, TRUE);
-        hEditCmd = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "cmd.exe", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 20, 30, 440, 25, hwnd, (HMENU)ID_EDIT_CMD, NULL, NULL);
+        hEditCmd = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", g_runCommand, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 20, 30, 440, 25, hwnd, (HMENU)ID_EDIT_CMD, NULL, NULL);
         SendMessageA(hEditCmd, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // --- 第二行：身份 & 完整性 ---
@@ -873,21 +924,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         hComboUser = CreateWindowA("COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWN, 20, 85, 210, 200, hwnd, (HMENU)ID_COMBO_USER, NULL, NULL);
         const char* users[] = { "System", "TrustedInstaller", "Administrator" };
         for (const char* u : users) SendMessageA(hComboUser, CB_ADDSTRING, 0, (LPARAM)u);
-        SendMessageA(hComboUser, WM_SETTEXT, 0, (LPARAM)"System");
+        SendMessageA(hComboUser, WM_SETTEXT, 0, (LPARAM)g_identityStr);
         SendMessageA(hComboUser, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         HWND hLblIL = CreateWindowA("STATIC", "完整性 (Integrity):", WS_CHILD | WS_VISIBLE, 250, 65, 150, 20, hwnd, NULL, NULL, NULL);
         SendMessageA(hLblIL, WM_SETFONT, (WPARAM)hFont, TRUE);
         hComboIL = CreateWindowA("COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 250, 85, 210, 200, hwnd, (HMENU)ID_COMBO_IL, NULL, NULL);
-        const char* levels[] = { "System (S)", "High (H)", "Medium (M)", "Low (L)", "Untrusted (U)" };
+        const char* levels[] = { "System (S)", "High (H)", "Medium+ (M+)", "Medium (M)", "Low (L)", "Untrusted (U)" };
         for (const char* l : levels) SendMessageA(hComboIL, CB_ADDSTRING, 0, (LPARAM)l);
-        SendMessageA(hComboIL, CB_SETCURSEL, 0, 0);
+        
+        switch(Integrity_Level) {
+            case SECURITY_MANDATORY_HIGH_RID: SendMessageA(hComboIL, CB_SETCURSEL, 1, 0); break;
+            case SECURITY_MANDATORY_MEDIUM_PLUS_RID: SendMessageA(hComboIL, CB_SETCURSEL, 2, 0); break;
+            case SECURITY_MANDATORY_MEDIUM_RID: SendMessageA(hComboIL, CB_SETCURSEL, 3, 0); break;
+            case SECURITY_MANDATORY_LOW_RID: SendMessageA(hComboIL, CB_SETCURSEL, 4, 0); break;
+            case SECURITY_MANDATORY_UNTRUSTED_RID: SendMessageA(hComboIL, CB_SETCURSEL, 5, 0); break;
+            default: SendMessageA(hComboIL, CB_SETCURSEL, 0, 0); break;
+        }
+        
         SendMessageA(hComboIL, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // --- 第三行：桌面 & 路径 ---
         HWND hLblDesk = CreateWindowA("STATIC", "桌面 (Desktop):", WS_CHILD | WS_VISIBLE, 20, 120, 150, 20, hwnd, NULL, NULL, NULL);
         SendMessageA(hLblDesk, WM_SETFONT, (WPARAM)hFont, TRUE);
-        hEditDesktop = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "winsta0\\default", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 20, 140, 210, 25, hwnd, (HMENU)ID_EDIT_DESKTOP, NULL, NULL);
+        hEditDesktop = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", g_desktop, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 20, 140, 210, 25, hwnd, (HMENU)ID_EDIT_DESKTOP, NULL, NULL);
         SendMessageA(hEditDesktop, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         HWND hLblDir = CreateWindowA("STATIC", "路径 (Directory):", WS_CHILD | WS_VISIBLE, 250, 120, 150, 20, hwnd, NULL, NULL, NULL);
@@ -901,6 +961,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SendMessageA(hLblGrp, WM_SETFONT, (WPARAM)hFont, TRUE);
         hEditGroups = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY, 20, 195, 440, 25, hwnd, (HMENU)ID_EDIT_GROUPS, NULL, NULL);
         SendMessageA(hEditGroups, WM_SETFONT, (WPARAM)hFont, TRUE);
+        if (extraGroups.empty()) SetWindowTextA(hEditGroups, "");
+        else if (extraGroups.size() == 1) SetWindowTextA(hEditGroups, extraGroups[0].c_str());
+        else {
+            std::string txt = extraGroups[0] + "...";
+            SetWindowTextA(hEditGroups, txt.c_str());
+        }
         // Subclass
         OldEditProc = (WNDPROC)SetWindowLongPtr(hEditGroups, GWLP_WNDPROC, (LONG_PTR)SubclassEditProc);
 
@@ -910,16 +976,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         hComboMode = CreateWindowA("COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 20, 250, 100, 200, hwnd, (HMENU)ID_COMBO_MODE, NULL, NULL);
         const char* modes[] = { "Normal", "Hide", "Maximize", "Minimize" };
         for (const char* m : modes) SendMessageA(hComboMode, CB_ADDSTRING, 0, (LPARAM)m);
-        SendMessageA(hComboMode, CB_SETCURSEL, 0, 0);
+        
+        switch(g_WindowCreateMode) {
+            case SW_SHOWMAXIMIZED: SendMessageA(hComboMode, CB_SETCURSEL, 2, 0); break;
+            case SW_SHOWMINIMIZED: SendMessageA(hComboMode, CB_SETCURSEL, 3, 0); break;
+            case SW_HIDE: SendMessageA(hComboMode, CB_SETCURSEL, 1, 0); break;
+            default: SendMessageA(hComboMode, CB_SETCURSEL, 0, 0); break;
+        }
+        
         SendMessageA(hComboMode, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         hCheckUIAccess = CreateWindowA("BUTTON", "UI Access", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 140, 250, 90, 20, hwnd, (HMENU)ID_CHECK_UIACCESS, NULL, NULL);
         SendMessageA(hCheckUIAccess, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageA(hCheckUIAccess, BM_SETCHECK, (WPARAM)g_bUIAccess, 0);
 
         hCheckDebug = CreateWindowA("BUTTON", "Debug Log", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 240, 250, 90, 20, hwnd, (HMENU)ID_CHECK_DEBUG, NULL, NULL);
         SendMessageA(hCheckDebug, WM_SETFONT, (WPARAM)hFont, TRUE);
-        SendMessageA(hCheckDebug, BM_SETCHECK, BST_CHECKED, 0);
-        g_bDebug = true;
+        SendMessageA(hCheckDebug, BM_SETCHECK, (WPARAM)g_bDebug, 0);
 
         // --- 按钮 ---
         HWND hBtnRun = CreateWindowA("BUTTON", "运行 (Run)", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 340, 240, 120, 35, hwnd, (HMENU)ID_BTN_RUN, NULL, NULL);
@@ -934,8 +1007,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_NOHIDESEL,
             20, 300, 440, 120, hwnd, (HMENU)ID_EDIT_LOG, NULL, NULL);
 
-        // RichEdit 需要设置事件掩码才能支持某些行为，但在只读模式下默认即可
         {
+            // RichEdit 需要设置事件掩码才能支持某些行为，但在只读模式下默认即可
             HFONT hFont = CreateFontA(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET,
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, "Consolas");
@@ -952,44 +1025,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             char bufUser[256] = { 0 };
             char bufDesk[256] = { 0 };
             char bufDir[MAX_PATH] = { 0 };
-            // Groups taken from g_vecGroups now
+            // Groups taken from extraGroups now
 
             GetWindowTextA(hEditCmd, bufCmd, 2047);
             GetWindowTextA(hComboUser, bufUser, 255);
             GetWindowTextA(hEditDesktop, bufDesk, 255);
             GetWindowTextA(hEditDir, bufDir, MAX_PATH - 1);
 
-            if (strlen(bufCmd) == 0) {
+            if (*bufCmd == 0) {
                 MessageBoxA(hwnd, "请输入命令", "错误", MB_OK | MB_ICONERROR);
                 return 0;
             }
-            if (strlen(bufUser) == 0) strcpy(bufUser, "S");
+            if (*bufUser == 0) strcpy(bufUser, "System");
 
             int ilIdx = SendMessageA(hComboIL, CB_GETCURSEL, 0, 0);
             DWORD dwIL = (DWORD)-1;
             switch (ilIdx) {
-            case 1: dwIL = SECURITY_MANDATORY_HIGH_RID; break;
-            case 2: dwIL = SECURITY_MANDATORY_MEDIUM_RID; break;
-            case 3: dwIL = SECURITY_MANDATORY_LOW_RID; break;
-            case 4: dwIL = SECURITY_MANDATORY_UNTRUSTED_RID; break;
-            default: dwIL = SECURITY_MANDATORY_SYSTEM_RID; break;
+                case 1: dwIL = SECURITY_MANDATORY_HIGH_RID; break;
+                case 2: dwIL = SECURITY_MANDATORY_MEDIUM_PLUS_RID; break;
+                case 3: dwIL = SECURITY_MANDATORY_MEDIUM_RID; break;
+                case 4: dwIL = SECURITY_MANDATORY_LOW_RID; break;
+                case 5: dwIL = SECURITY_MANDATORY_UNTRUSTED_RID; break;
+                default: dwIL = SECURITY_MANDATORY_SYSTEM_RID; break;
             }
 
             int modeIdx = SendMessageA(hComboMode, CB_GETCURSEL, 0, 0);
             int nShow = SW_SHOWNORMAL;
             switch (modeIdx) {
-            case 1: nShow = SW_HIDE; break;
-            case 2: nShow = SW_SHOWMAXIMIZED; break;
-            case 3: nShow = SW_SHOWMINIMIZED; break;
-            default: nShow = SW_SHOWNORMAL; break;
+                case 1: nShow = SW_HIDE; break;
+                case 2: nShow = SW_SHOWMAXIMIZED; break;
+                case 3: nShow = SW_SHOWMINIMIZED; break;
+                default: nShow = SW_SHOWNORMAL; break;
             }
 
-            BOOL bUIAccess = (SendMessageA(hCheckUIAccess, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            g_bDebug = (SendMessageA(hCheckDebug, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-            // 转换 vector to ptr list
-            std::vector<const char*> groupPtrs;
-            for (const auto& g : g_vecGroups) groupPtrs.push_back(g.c_str());
+            BOOL bUIAccess = (SendMessageA(hCheckUIAccess, BM_GETCHECK, 0, 0) == BST_CHECKED), g_bDebug = (SendMessageA(hCheckDebug, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
             SendMessageA(g_hLogEdit, WM_SETTEXT, 0, (LPARAM)"");
             Log(LOG_INFO, "=== 开始执行 ===");
@@ -1002,7 +1071,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 nShow,
                 dwIL,
                 bUIAccess,
-                groupPtrs,
+                extraGroups,
                 NULL
             );
 
@@ -1032,17 +1101,15 @@ int main(int argc, char* argv[]) {
 
     LoadLibraryA("Msftedit.dll");
 
-    std::string identityStr = "S", desktop = "winsta0\\default";
-    bool bBypass = false, bUIAccess = false, bIsAdmin = IsUserAnAdmin(), bCleanRegistry = false, bShowGUI = false;
-    std::vector<const char*> extraGroups;
+    bool bBypass = false, bIsAdmin = IsUserAnAdmin(), bCleanRegistry = false, bShowGUI = false, bNeedChangeDir = true;
     int argStart = argc;
-    int ParentProcessId = 0, WindowCreateMode = SW_SHOWNORMAL;
-    DWORD Integrity_Level = -1;
+    int ParentProcessId = 0;
 
     // 参数解析
     int parseStart = 1;
 
     if (argc >= 4 && strcmp(argv[1], "-pid") == 0) {
+        bNeedChangeDir = false;
         ParentProcessId = atoi(argv[2]);
         parseStart = 4;
         if (argc >= 6 && strcmp(argv[3], "-E") == 0) {
@@ -1052,31 +1119,26 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    for (int i = parseStart; i < argc; i++) bShowGUI |= _stricmp(argv[i], "-GUI") == 0;
-
-    char CurrentDirectory[32768];
-    GetCurrentDirectoryA(32768, CurrentDirectory);
-
     for (int i = parseStart; i < argc; i++) {
         if (_stricmp(argv[i], "-D") == 0 || _stricmp(argv[i], "--debug") == 0) {
             g_bDebug = true;
         }
         else if (_stricmp(argv[i], "--UIAccess") == 0) {
-            bUIAccess = true;
+            g_bUIAccess = true;
         }
         else if (_stricmp(argv[i], "-GUI") == 0) {
-            continue;
+            bShowGUI = true;
         }
         else if (_stricmp(argv[i], "-B") == 0 || _stricmp(argv[i], "--Bypass") == 0) {
             bBypass = true;
         }
         else if (_strnicmp(argv[i], "-U:", 3) == 0) {
             if (strlen(argv[i]) <= 3) { Log(LOG_ERROR, "-U 需要指定身份"); return 1; }
-            identityStr = argv[i] + 3;
+            g_identityStr = argv[i] + 3;
         }
         else if (_strnicmp(argv[i], "-P:", 3) == 0) {
             if (strlen(argv[i]) <= 3) { Log(LOG_ERROR, "-P 需要指定桌面"); return 1; }
-            desktop = argv[i] + 3;
+            g_desktop = argv[i] + 3;
         }
         else if (_strnicmp(argv[i], "-IL:", 4) == 0) {
             DWORD IL_id = ResolveILlevel(argv[i] + 4);
@@ -1087,11 +1149,11 @@ int main(int argc, char* argv[]) {
             if (strlen(argv[i]) <= 3) { Log(LOG_ERROR, "-M 需要打开的窗口模式"); return 1; }
             int CreateMode = ResolveWindowCreateMode(argv[i] + 3);
             if (CreateMode == -2) { Log(LOG_WARN, "无法解析打开的窗口模式: %s", argv[i] + 3); }
-            WindowCreateMode = CreateMode;
+            g_WindowCreateMode = CreateMode;
         }
         else if (_strnicmp(argv[i], "-C:", 3) == 0) {
             if (strlen(argv[i]) <= 3) { Log(LOG_ERROR, "-C 需要路径"); return 1; }
-            if (bIsAdmin && !bShowGUI) {
+            if (bNeedChangeDir) {
                 if (!SetCurrentDirectoryA(argv[i] + 3)) {
                     DWORD errCode = GetLastError();
                     Log(LOG_WARN, "更改目录至：%s 失败, 错误码：%lu", argv[i] + 3, errCode);
@@ -1101,7 +1163,7 @@ int main(int argc, char* argv[]) {
         }
         else if (_strnicmp(argv[i], "-G:", 3) == 0) {
             if (strlen(argv[i]) <= 3) { Log(LOG_ERROR, "-G 需要值"); return 1; }
-            extraGroups.push_back(argv[i] + 3);
+            extraGroups.push_back(std::string(argv[i] + 3));
         }
         else if (argv[i][0] == '-') {
             Log(LOG_ERROR, "未知的参数: %s", argv[i]);
@@ -1111,74 +1173,73 @@ int main(int argc, char* argv[]) {
             break;
         }
     }
-
-    // 如果指定了 -GUI 且当前是管理员，显示 GUI
-    if (bIsAdmin && bShowGUI) {
-        ShowWindow(GetConsoleWindow(), SW_HIDE);
-
-        WNDCLASSEXA wc{};
-        wc.cbSize = sizeof(WNDCLASSEXA);
-        wc.lpfnWndProc = WndProc;
-        wc.hInstance = GetModuleHandle(NULL);
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW);
-        wc.lpszClassName = "WinSudoGuiClass";
-
-        RegisterClassExA(&wc);
-
-        int w = 500, h = 480; // 稍微增加高度以容纳新控件
-
-        HWND hwnd = CreateWindowA("WinSudoGuiClass", "WinSudo GUI Launcher", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-            CW_USEDEFAULT, CW_USEDEFAULT, w, h, NULL, NULL, GetModuleHandle(NULL), NULL);
-
-        ShowWindow(hwnd, SW_SHOW);
-        UpdateWindow(hwnd);
-
-        MSG msg;
-        while (GetMessage(&msg, NULL, 0, 0) > 0) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-        return 0;
-    }
-
-    // 构建命令行
-    LPSTR cmdLine = GetCommandLineA();
-    if (argStart < argc) {
-        BOOL InQuotes = 0, InEscape = 0;
-        for (int i = 0; i < argStart; i++) {
-            for (; *cmdLine != ' ' || InQuotes; cmdLine++) {
-                if (*cmdLine == '\\') {
-                    InEscape ^= 1;
-                }
-                else if (!InEscape && *cmdLine == '\"') {
-                    InQuotes ^= 1;
-                }
-                else {
-                    InEscape = 0;
-                }
-            }
-            for (; isspace(*cmdLine); cmdLine++);
-        }
-    }
-    else {
-        cmdLine = (LPSTR)"cmd.exe";
-    }
-
-    if (WindowCreateMode == -1) {
-        SetConsoleCtrlHandler(NULL, TRUE);
-    }
-
+    
     if (bIsAdmin) {
-        // ==========================================
-        // 管理员模式：执行核心逻辑
-        // ==========================================
-
+        // 清理注册表
         if (bCleanRegistry) {
             RegDeleteTreeA(HKEY_CURRENT_USER, "Software\\Classes\\ms-settings");
             Log(LOG_DEBUG, "已清理 bypass 注册表项");
         }
-
+        
+        // 构建命令行
+        if (argStart < argc) {
+            g_runCommand = GetCommandLineA();
+            BOOL InQuotes = 0, InEscape = 0;
+            for (int i = 0; i < argStart; i++) {
+                for (; *g_runCommand != ' ' || InQuotes; g_runCommand++) {
+                    if (*g_runCommand == '\\') {
+                        InEscape ^= 1;
+                    }
+                    else if (!InEscape && *g_runCommand == '\"') {
+                        InQuotes ^= 1;
+                    }
+                    else {
+                        InEscape = 0;
+                    }
+                }
+                for (; isspace(*g_runCommand); g_runCommand++);
+            }
+        }
+        
+        // 如果指定了 -GUI 且当前是管理员，显示 GUI
+        if (bShowGUI) {
+            ShowWindow(GetConsoleWindow(), SW_HIDE);
+    
+            WNDCLASSEXA wc{};
+            wc.cbSize = sizeof(WNDCLASSEXA);
+            wc.lpfnWndProc = WndProc;
+            wc.hInstance = GetModuleHandle(NULL);
+            wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+            wc.hbrBackground = (HBRUSH)(COLOR_WINDOW);
+            wc.lpszClassName = "WinSudoGuiClass";
+    
+            RegisterClassExA(&wc);
+    
+            int w = 500, h = 480; // 稍微增加高度以容纳新控件
+    
+            HWND hwnd = CreateWindowA("WinSudoGuiClass", "WinSudo GUI Launcher", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                CW_USEDEFAULT, CW_USEDEFAULT, w, h, NULL, NULL, GetModuleHandle(NULL), NULL);
+    
+            ShowWindow(hwnd, SW_SHOW);
+            UpdateWindow(hwnd);
+    
+            MSG msg;
+            while (GetMessage(&msg, NULL, 0, 0) > 0) {
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
+            return 0;
+        }
+    }
+    
+    if (g_WindowCreateMode == -1) {
+        SetConsoleCtrlHandler(NULL, TRUE);
+    }
+    
+    if (bIsAdmin) {
+        // ==========================================
+        // 管理员模式：执行核心逻辑
+        // ==========================================
         if (ParentProcessId > 0) {
             FreeConsole();
             if (!AttachConsole(ParentProcessId)) {
@@ -1190,19 +1251,19 @@ int main(int argc, char* argv[]) {
 
         // 调用封装好的核心逻辑
         BOOL success = ExecuteSudoOperation(
-            cmdLine,
-            identityStr,
-            desktop,
+            g_runCommand,
+            g_identityStr,
+            g_desktop,
             "", // CLI模式下已在上方 SetCurrentDirectory 设置了 CWD，此处传空即可
-            WindowCreateMode,
+            g_WindowCreateMode,
             Integrity_Level,
-            bUIAccess,
+            g_bUIAccess,
             extraGroups,
             &pi
         );
 
         if (success) {
-            if (WindowCreateMode == -1) {
+            if (g_WindowCreateMode == -1) {
                 WaitForSingleObject(pi.hProcess, INFINITE);
                 DWORD exitCode = 0;
                 GetExitCodeProcess(pi.hProcess, &exitCode);
@@ -1228,6 +1289,9 @@ int main(int argc, char* argv[]) {
         // ==========================================
         // UAC Bypass 模式
         // ==========================================
+        char CurrentDirectory[32768];
+        GetCurrentDirectoryA(32768, CurrentDirectory);
+        
         char selfPath[MAX_PATH];
         char cmdline[32768];
 
