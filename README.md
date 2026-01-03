@@ -1,7 +1,10 @@
 # Windows-Sudo
-一个单文件、静态编译的 Windows 提权工具。它能够以 SYSTEM 或 TrustedInstaller 权限运行命令。
+一个单文件、静态编译的 Windows 提权工具。它能够以任意权限运行命令。
 
 ## 核心特性：
-- 全权限支持：支持提权至 Administrator, System, TrustedInstaller。
+- 全权限支持：可以直接指定启动后的身份（SID 或 用户名）。
 - 让高权限进程直接复用当前终端窗口，支持标准输入输出重定向。
 - Session 穿透：自动修正 Token Session ID，支持从 Session 0 (服务/后台) 穿透至当前活动桌面 (WTSActive)。
+- **完全自定义令牌**，创建的令牌可以指定任意身份，加入任意组，拥有任意特权，任意完整性
+- 支持 Bypass UAC
+- 拥有 GUI
