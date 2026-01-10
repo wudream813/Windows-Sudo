@@ -158,7 +158,7 @@ typedef NTSTATUS(NTAPI* PNtCreateToken)(
 
 void ShowUsage_Brief(const char* prog) {
     printf("\n");
-    printf("WinSudo v3.2.0 - 以任意身份运行程序\n");
+    printf("WinSudo v3.1.1\n");
     printf("================================\n\n");
     printf("用法: %s [选项] [命令 (默认为 cmd.exe)]\n\n", prog);
     printf("预设:\n");
@@ -192,7 +192,7 @@ void ShowUsage_Brief(const char* prog) {
 
 void ShowUsage_Detailed(const char* prog) {
     printf("\n");
-    printf("WinSudo v3.2.0 - 以任意身份运行程序\n");
+    printf("WinSudo v3.1.1\n");
     printf("================================\n\n");
     printf("用法: %s [选项] [命令 (默认为 cmd.exe)]\n\n", prog);
     printf("预设:\n");
@@ -405,7 +405,8 @@ DWORD GetPidByNameA(LPCSTR processName) {
     DWORD pid = 0;
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32 pe = { sizeof(pe) };
+        PROCESSENTRY32 pe = {};
+        pe.dwSize = sizeof(pe);
         if (Process32First(hSnapshot, &pe)) {
             do {
                 if (_stricmp(pe.szExeFile, processName) == 0) {
@@ -484,14 +485,14 @@ PSID ResolveIdentity(const char* identityStr) {
     return GetSidForAccountName(identityStr);
 }
 
-DWORD ResolveILlevel(const char* level) {
+long ResolveILlevel(const char* level) {
     if (_stricmp(level, "untrusted") == 0 || _stricmp(level, "u") == 0)return SECURITY_MANDATORY_UNTRUSTED_RID;
     if (_stricmp(level, "low") == 0 || _stricmp(level, "l") == 0)return SECURITY_MANDATORY_LOW_RID;
     if (_stricmp(level, "medium") == 0 || _stricmp(level, "m") == 0)return SECURITY_MANDATORY_MEDIUM_RID;
     if (_stricmp(level, "medium+") == 0 || _stricmp(level, "m+") == 0)return SECURITY_MANDATORY_MEDIUM_PLUS_RID;
     if (_stricmp(level, "high") == 0 || _stricmp(level, "h") == 0)return SECURITY_MANDATORY_HIGH_RID;
     if (_stricmp(level, "system") == 0 || _stricmp(level, "s") == 0)return SECURITY_MANDATORY_SYSTEM_RID;
-    return (DWORD)-1;
+    return -1;
 }
 
 struct Preset{
@@ -767,7 +768,8 @@ HANDLE CreateCustomToken(DWORD targetSessionId, PSID pUserSid, const std::vector
     AllocateLocallyUniqueId(&tSource.SourceIdentifier);
     LUID authId = { 0x3e7, 0 };
     LARGE_INTEGER exp; exp.QuadPart = -1;
-    OBJECT_ATTRIBUTES  oa = { sizeof(OBJECT_ATTRIBUTES) };
+    OBJECT_ATTRIBUTES oa = {};
+    oa.Length = sizeof(OBJECT_ATTRIBUTES);
 
     Log(LOG_DEBUG, "调用 NtCreateToken...");
     HANDLE hNewToken = NULL;
@@ -875,8 +877,7 @@ BOOL ExecuteSudoOperation(
     
     if(!RemovePrivilege.empty()) {
         for(int id : RemovePrivilege) {
-            LUID_AND_ATTRIBUTES Privilege{DWORD(id + 1), SE_PRIVILEGE_REMOVED};
-            TOKEN_PRIVILEGES tp{1, {DWORD(id + 1), SE_PRIVILEGE_REMOVED}};
+            LUID_AND_ATTRIBUTES Privilege{{DWORD(id + 1), 0}, SE_PRIVILEGE_REMOVED};
             HANDLE tmpToken = NULL;
             if (CreateRestrictedToken(
                 hToken,
@@ -900,7 +901,7 @@ BOOL ExecuteSudoOperation(
     
     if(!DisabledPrivilege.empty()) {
         for(int id : DisabledPrivilege) {
-            TOKEN_PRIVILEGES tp{1, {DWORD(id + 1), 0}};
+            TOKEN_PRIVILEGES tp{1, {{{DWORD(id + 1), 0}, 0L}}};
             if (AdjustTokenPrivileges(hToken,
                 FALSE,
                 &tp,
@@ -919,11 +920,12 @@ BOOL ExecuteSudoOperation(
     LPVOID lpEnv = NULL;
     CreateEnvironmentBlock(&lpEnv, hToken, FALSE);
 
-    STARTUPINFOA si = { sizeof(si) };
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
     si.lpDesktop = desktop;
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = windowMode;
-    PROCESS_INFORMATION pi = { 0 };
+    PROCESS_INFORMATION pi = {};
     DWORD dwCreationFlags = CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE;
     LPCSTR lpCurrentDir = workingDir.empty() ? NULL : workingDir.c_str();
 
@@ -966,7 +968,7 @@ BOOL ExecuteSudoOperation(
 // 辅助函数：添加新组
 void AddNewGroupItem(HWND hList) {
     int count = ListView_GetItemCount(hList);
-    LVITEMA lvi = { 0 };
+    LVITEMA lvi = {};
     lvi.mask = LVIF_TEXT;
     lvi.iItem = count;
     lvi.pszText = (LPSTR)""; 
@@ -992,10 +994,10 @@ LRESULT CALLBACK GroupEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             hList = CreateWindowExA(0, WC_LISTVIEW, "", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_EDITLABELS | LVS_SHOWSELALWAYS, 10, 10, 200, 500, hwnd, (HMENU)ID_LISTVIEW_GROUPS, GetModuleHandle(NULL), NULL);
             ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
             SendMessageA(hList, WM_SETFONT, (WPARAM)hFont, TRUE);
-            LVCOLUMNA lvc = { 0 }; lvc.mask = LVCF_WIDTH; lvc.cx = 190;
+            LVCOLUMNA lvc = {}; lvc.mask = LVCF_WIDTH; lvc.cx = 190;
             ListView_InsertColumn(hList, 0, &lvc);
             for (size_t i = 0; i < extraGroups.size(); i++) {
-                LVITEMA lvi = { 0 }; lvi.mask = LVIF_TEXT; lvi.iItem = (int)i; lvi.pszText = (LPSTR)extraGroups[i].c_str();
+                LVITEMA lvi = {}; lvi.mask = LVIF_TEXT; lvi.iItem = (int)i; lvi.pszText = (LPSTR)extraGroups[i].c_str();
                 ListView_InsertItem(hList, &lvi);
             }
             HWND hBtnAdd = CreateWindow("BUTTON", "新建 (New)", WS_CHILD | WS_VISIBLE, 220, 10, 90, 30, hwnd, (HMENU)ID_BTN_ADD_GRP, NULL, NULL);
@@ -1081,7 +1083,7 @@ void ShowGroupEditor(HWND hParent) {
         SetForegroundWindow(g_hGroupEditor); 
         return; 
     }
-    WNDCLASSEXA wc = { 0 }; 
+    WNDCLASSEXA wc = {}; 
     wc.cbSize = sizeof(wc); 
     wc.lpfnWndProc = GroupEditorWndProc; 
     wc.hInstance = GetModuleHandle(NULL);
@@ -1172,7 +1174,7 @@ LRESULT CALLBACK PrivilegeEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
             SendMessageA(hList, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            LVCOLUMNA lvc = { 0 };
+            LVCOLUMNA lvc = {};
             lvc.mask = LVCF_WIDTH | LVCF_TEXT;
             lvc.cx = 260; lvc.pszText = (LPSTR)"Privilege Name";
             ListView_InsertColumn(hList, 0, &lvc);
@@ -1185,7 +1187,7 @@ LRESULT CALLBACK PrivilegeEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
             // 填充特权列表
             for (int i = 0; i < 35; i++) {
-                LVITEMA lvi = { 0 };
+                LVITEMA lvi = {};
                 lvi.mask = LVIF_TEXT | LVIF_PARAM;
                 lvi.iItem = i;
                 lvi.pszText = (LPSTR)AllPrivileges[i];
@@ -1238,7 +1240,7 @@ LRESULT CALLBACK PrivilegeEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             char statusBuf[32];
             for (int i = 0; i < count; i++) {
                 ListView_GetItemText(hList, i, 1, statusBuf, 31);
-                LVITEMA lvi = {0};
+                LVITEMA lvi = {};
                 lvi.iItem = i;
                 lvi.mask = LVIF_PARAM;
                 ListView_GetItem(hList, &lvi);
@@ -1275,7 +1277,7 @@ void ShowPrivilegeEditor(HWND hParent) {
         SetForegroundWindow(g_hPrivEditor); 
         return; 
     }
-    WNDCLASSEXA wc = { 0 }; 
+    WNDCLASSEXA wc = {}; 
     wc.cbSize = sizeof(wc); 
     wc.lpfnWndProc = PrivilegeEditorWndProc; 
     wc.hInstance = GetModuleHandle(NULL);
@@ -1387,12 +1389,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessageA(hBtnFileBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
             
             // 3. Directory
-            HWND hLblDir = CreateWindowA("STATIC", "启动路径 (Directory):", WS_CHILD | WS_VISIBLE, 20, yCmd + 55, 300, 20, hwnd, NULL, NULL, NULL);
+            HWND hLblDir = CreateWindowA("STATIC", "启动路径 (Directory):", WS_CHILD | WS_VISIBLE, 20, yDir, 300, 20, hwnd, NULL, NULL, NULL);
             SendMessageA(hLblDir, WM_SETFONT, (WPARAM)hFont, TRUE);
             char currDir[MAX_PATH]; GetCurrentDirectoryA(MAX_PATH, currDir);
-            hEditDir = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", currDir, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 20, yCmd + 75, 340, 25, hwnd, (HMENU)ID_EDIT_DIR, NULL, NULL);
+            hEditDir = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", currDir, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 20, yDir + 20, 340, 25, hwnd, (HMENU)ID_EDIT_DIR, NULL, NULL);
             SendMessageA(hEditDir, WM_SETFONT, (WPARAM)hFont, TRUE);
-            HWND hBtnDirBrowse = CreateWindowA("BUTTON", "浏览...", WS_CHILD | WS_VISIBLE, 380, yCmd + 75, 80, 25, hwnd, (HMENU)ID_BTN_DIR_BROWSE, NULL, NULL);
+            HWND hBtnDirBrowse = CreateWindowA("BUTTON", "浏览...", WS_CHILD | WS_VISIBLE, 380, yDir + 20, 80, 25, hwnd, (HMENU)ID_BTN_DIR_BROWSE, NULL, NULL);
             SendMessageA(hBtnDirBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
             
             // 4. Desktop & Integrity
@@ -1634,8 +1636,8 @@ int main(int argc, char* argv[]) {
             g_desktop = argv[i] + 3;
         }
         else if (_strnicmp(argv[i], "-IL:", 4) == 0) {
-            DWORD IL_id = ResolveILlevel(argv[i] + 4);
-            if (IL_id == -1) { Log(LOG_WARN, "无法解析完整性级别: %s", argv[i] + 4); }
+            long IL_id = ResolveILlevel(argv[i] + 4);
+            if (IL_id == -1L) { Log(LOG_WARN, "无法解析完整性级别: %s", argv[i] + 4); }
             Integrity_Level = IL_id;
         }
         else if (_strnicmp(argv[i], "-Disabled:", 10) == 0) {
@@ -1710,8 +1712,9 @@ int main(int argc, char* argv[]) {
             DWORD dwProcCount = GetConsoleProcessList(procList, 2);
             
             if(dwProcCount > 1) {
-                STARTUPINFOA si = { sizeof(si) };
-                PROCESS_INFORMATION pi = { 0 };
+                STARTUPINFOA si = {};
+                si.cb = sizeof(si);
+                PROCESS_INFORMATION pi = {};
 
                 // 使用 DETACHED_PROCESS，新进程将没有控制台，是一个纯后台/GUI 进程
                 BOOL bSuccess = CreateProcessA(
@@ -1773,7 +1776,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        PROCESS_INFORMATION pi = { 0 };
+        PROCESS_INFORMATION pi = {};
 
         // 调用封装好的核心逻辑
         BOOL success = ExecuteSudoOperation(
@@ -1839,7 +1842,8 @@ int main(int argc, char* argv[]) {
 
         Log(LOG_DEBUG, "Bypass 命令: %s", cmdline);
 
-        SHELLEXECUTEINFOA sei = { sizeof(sei) };
+        SHELLEXECUTEINFOA sei = {};
+        sei.cbSize = sizeof(sei);
         sei.lpFile = "fodhelper.exe";
         sei.nShow = SW_HIDE;
 
@@ -1870,7 +1874,8 @@ int main(int argc, char* argv[]) {
 
         Log(LOG_DEBUG, "提权参数: %s", params);
 
-        SHELLEXECUTEINFOA sei = { sizeof(sei) };
+        SHELLEXECUTEINFOA sei = {};
+        sei.cbSize = sizeof(sei);
         sei.lpVerb = "runas";
         sei.lpFile = selfPath;
         sei.lpParameters = params;
